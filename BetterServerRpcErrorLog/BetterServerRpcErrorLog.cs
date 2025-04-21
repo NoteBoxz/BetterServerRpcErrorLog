@@ -1,8 +1,7 @@
 using BepInEx;
 using BepInEx.Configuration;
 using BepInEx.Logging;
-using BetterServerRpcErrorLog;
-using Dissonance;
+using GameNetcodeStuff;
 using HarmonyLib;
 using System;
 using System.Collections;
@@ -21,6 +20,7 @@ public class BetterServerRpcErrorLog : BaseUnityPlugin
     public new static ManualLogSource Logger { get; private set; } = null!;
     private static Harmony Harmony = null!;
     public static ConfigEntry<bool> LogAssemblyScanning { get; private set; } = null!;
+    public static ConfigEntry<bool> RemoveFirstLineOfStackTrace { get; private set; } = null!;
     public static int ServerRpcCount { get; private set; } = 0;
 
     private void Awake()
@@ -29,11 +29,19 @@ public class BetterServerRpcErrorLog : BaseUnityPlugin
         Logger = base.Logger;
 
         Logger.LogInfo($"Active, waiting for game to start before dynamic patching...");
+
         LogAssemblyScanning = Config.Bind(
         "General",
         "LogAssemblyScanning",
         false,
         "Enable/disable logging of assembly scanning progress");
+
+        RemoveFirstLineOfStackTrace = Config.Bind(
+        "General",
+        "RemoveFirstLineOfStackTrace",
+        true,
+        "Enable/disable removing the first line of the stack trace in the error log. This first line is usually from the mod itself and not the actual error.");
+
         Patch();
     }
 
@@ -135,7 +143,8 @@ public class BetterServerRpcErrorLog : BaseUnityPlugin
             {
                 try
                 {
-                    methodsToPatch.AddRange(type.GetMethods().Where(m => m.Name.EndsWith("ServerRpc")));
+                    methodsToPatch.AddRange(type.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static)
+                        .Where(m => m.Name.EndsWith("ServerRpc")));
                 }
                 catch (Exception ex)
                 {
@@ -148,6 +157,9 @@ public class BetterServerRpcErrorLog : BaseUnityPlugin
                 try
                 {
                     string methodName = GetUniqueMethodSignature(method);
+
+                    //Logger.LogInfo($"Found ServerRpc: {methodName}");
+
                     if (methodsPatched.Contains(methodName))
                     {
                         if (LogAssemblyScanning.Value)
@@ -169,14 +181,12 @@ public class BetterServerRpcErrorLog : BaseUnityPlugin
                     }
 
 
-                    //Logger.LogInfo($"Found ServerRpc: {methodName} ({attr.RequireOwnership})");
-
                     // Create and apply a dynamic postfix patch
                     try
                     {
                         Harmony.Patch(
                             original: method,
-                            postfix: new HarmonyMethod(typeof(BetterServerRpcErrorLog).GetMethod(nameof(ServerRpcPostfix), BindingFlags.Static | BindingFlags.NonPublic))
+                            prefix: new HarmonyMethod(typeof(BetterServerRpcErrorLog).GetMethod(nameof(ServerRpcPrefix), BindingFlags.Static | BindingFlags.NonPublic))
                         );
                         ServerRpcCount++;
                         if (LogAssemblyScanning.Value)
@@ -203,49 +213,58 @@ public class BetterServerRpcErrorLog : BaseUnityPlugin
 
 
     // This is the postfix method that will be applied to all ServerRpc methods
-    private static void ServerRpcPostfix(MethodBase __originalMethod, NetworkBehaviour __instance)
+    private static void ServerRpcPrefix(MethodBase __originalMethod, NetworkBehaviour __instance)
     {
         try
         {
-            // Get the NetworkManager instance
             NetworkManager networkManager = __instance.NetworkManager;
 
+            if ((object)networkManager == null || !networkManager.IsListening)
+            {
+                return;
+            }
+
             // Check if the owner of the NetworkBehaviour is the one calling the method
-            if ((int)__instance.__rpc_exec_stage != 1 && (networkManager.IsClient || networkManager.IsHost)
-            && __instance.OwnerClientId != networkManager.LocalClientId)
+            if (__instance.__rpc_exec_stage != NetworkBehaviour.__RpcExecStage.Server && (networkManager.IsClient || networkManager.IsHost)
+                && __instance.OwnerClientId != networkManager.LocalClientId)
             {
                 // Get a stack trace to identify the caller
-                System.Diagnostics.StackTrace stackTrace = new System.Diagnostics.StackTrace(true);
                 string callerInfo = string.Empty;
+                string trace = Environment.StackTrace;
 
-                // Get the first few frames of the stack trace (skip the first one as it's this method)
-                for (int i = 1; i < Math.Min(4, stackTrace.FrameCount); i++)
+                if (RemoveFirstLineOfStackTrace.Value)
                 {
-                    var frame = stackTrace.GetFrame(i);
-                    if (frame != null && frame.GetMethod() != null)
-                    {
-                        callerInfo += $"\n   at {frame.GetMethod().DeclaringType}.{frame.GetMethod().Name}";
+                    // Split stack trace into lines
+                    string[] stackLines = trace.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
 
-                        if (frame.GetFileName() != null)
+                    // Find the index of our own method in the stack trace
+                    int indexToRemove = -1;
+                    for (int i = 0; i < stackLines.Length; i++)
+                    {
+                        if (stackLines[i].Contains("BetterServerRpcErrorLog.ServerRpcPrefix") ||
+                            stackLines[i].Contains("ServerRpcPrefix"))
                         {
-                            callerInfo += $" in {System.IO.Path.GetFileName(frame.GetFileName())}:line {frame.GetFileLineNumber()}";
+                            indexToRemove = i;
+                            break;
                         }
+                    }
+
+                    // Remove our method's line and reconstruct the stack trace
+                    if (indexToRemove >= 0 && stackLines.Length > indexToRemove + 1)
+                    {
+                        trace = string.Join(Environment.NewLine,
+                            stackLines.Where((line, index) => index != indexToRemove));
                     }
                 }
 
-                Logger.LogError($"Non-owner called ServerRpc that requires ownership: {GetUniqueMethodSignature(__originalMethod)}" +
-                               $"\nCalled by client {networkManager.LocalClientId}, but owner is {__instance.OwnerClientId}" +
-                               $"{callerInfo}");
-            }
-            else
-            {
-                // Optional: Log successful owner-based calls
-                //Logger.LogInfo($"ServerRpc called by owner: {GetUniqueMethodSignature(__originalMethod)}");
+                Logger.LogError($"stage({__instance.__rpc_exec_stage.ToString()}) Non-owner called ServerRpc that requires ownership: {GetUniqueMethodSignature(__originalMethod)}" +
+                               $"\nCalled by client {networkManager.LocalClientId}, but owner is {__instance.OwnerClientId}\n" +
+                               $"{trace}");
             }
         }
         catch (Exception ex)
         {
-            Logger.LogError($"Error in ServerRpcPostfix for {GetUniqueMethodSignature(__originalMethod)}: {ex.Message}");
+            Logger.LogError($"Error in ServerRpcPrefix for {GetUniqueMethodSignature(__originalMethod)}: {ex.Message}");
         }
     }
 
