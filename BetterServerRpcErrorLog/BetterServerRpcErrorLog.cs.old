@@ -1,0 +1,80 @@
+using System;
+using System.Linq;
+using System.Reflection;
+using System.Diagnostics;
+using BepInEx;
+using BepInEx.Logging;
+using HarmonyLib;
+
+namespace BetterServerRpcErrorLog
+{
+    [BepInPlugin(MyPluginInfo.PLUGIN_GUID, MyPluginInfo.PLUGIN_NAME, MyPluginInfo.PLUGIN_VERSION)]
+    internal class BetterServerRpcErrorLog : BaseUnityPlugin
+    {
+        internal new static ManualLogSource Logger { get; private set; } = null!;
+        internal static Harmony Harmony { get; set; } = null!;
+
+        private void Awake()
+        {
+            Logger = base.Logger;
+
+            // Apply our patches to BepInEx's logging system
+            Logger.LogInfo($"Initializing {MyPluginInfo.PLUGIN_NAME} v{MyPluginInfo.PLUGIN_VERSION}");
+            PatchBepInExLogger();
+        }
+
+        private void PatchBepInExLogger()
+        {
+            try
+            {
+                Harmony ??= new Harmony(MyPluginInfo.PLUGIN_GUID);
+
+                // Patch the DiskLogListener
+                PatchLogListener("BepInEx.Logging.DiskLogListener");
+
+                // Also patch the ConsoleLogListener
+                PatchLogListener("BepInEx.Logging.ConsoleLogListener");
+
+                Logger.LogInfo("Successfully patched BepInEx loggers");
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError($"Error while patching BepInEx loggers: {ex}");
+            }
+        }
+
+        private void PatchLogListener(string logListenerTypeName)
+        {
+            // Get the LogListener type from BepInEx
+            Type logListenerType = Type.GetType(logListenerTypeName + ", BepInEx.Core") ??
+                AppDomain.CurrentDomain.GetAssemblies()
+                    .SelectMany(a => a.GetTypes())
+                    .FirstOrDefault(t => t.FullName == logListenerTypeName);
+
+            if (logListenerType == null)
+            {
+                Logger.LogError($"Failed to find {logListenerTypeName} type");
+                return;
+            }
+
+            // Find the LogEvent method to patch
+            MethodInfo logEventMethod = logListenerType.GetMethod("LogEvent",
+                BindingFlags.Public | BindingFlags.Instance);
+
+            if (logEventMethod == null)
+            {
+                Logger.LogError($"Failed to find LogEvent method in {logListenerTypeName}");
+                return;
+            }
+
+            // Apply patch
+            Harmony.Patch(
+                logEventMethod,
+                prefix: new HarmonyMethod(typeof(LoggerPatch).GetMethod(nameof(LoggerPatch.LogEventPrefix),
+                    BindingFlags.Static | BindingFlags.Public))
+            );
+
+            Logger.LogInfo($"Successfully patched {logListenerTypeName}");
+        }
+    }
+}

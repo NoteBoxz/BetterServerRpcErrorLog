@@ -1,0 +1,83 @@
+using System;
+using System.Linq;
+using System.Reflection;
+using System.Diagnostics;
+using BepInEx;
+using BepInEx.Logging;
+using HarmonyLib;
+
+namespace BetterServerRpcErrorLog
+{
+    public static class LoggerPatch
+    {
+        public static void LogEventPrefix(object __instance, ref BepInEx.Logging.LogEventArgs eventArgs)
+        {
+            try
+            {
+                // Only process error level logs
+                if (eventArgs.Level != LogLevel.Error && eventArgs.Level != LogLevel.Fatal)
+                    return;
+
+                string message = eventArgs.Data?.ToString() ?? "";
+
+
+                // Check if this is a ServerRpc ownership error
+                if (message.Contains("Only the owner can invoke a ServerRpc that requires ownership"))
+                {
+                    // Get stack trace with file info
+                    StackTrace stackTrace = new StackTrace(true);
+                    var enhancedMsg = $"ServerRpc Ownership Error Details:\n{message}\n\nStack trace:\n";
+
+                    StackFrame[] frames = stackTrace.GetFrames();
+                    if (frames != null)
+                    {
+                        foreach (StackFrame frame in frames)
+                        {
+                            MethodBase method = frame.GetMethod();
+                            if (method == null) continue;
+
+                            bool isServerRpcMethod = method.GetCustomAttributes(true)
+                                .Any(attr => attr.GetType().Name.Contains("ServerRpc"))
+                                || method.Name.EndsWith("ServerRpc");
+                                
+                            Console.WriteLine($"Method: {method.Name}");
+                            foreach(var attr in method.GetCustomAttributes(true))
+                            {
+                                Console.WriteLine($"Attribute: {attr.GetType().Name}");
+                            }
+
+                            if (isServerRpcMethod)
+                            {
+                                string fileName = frame.GetFileName() ?? "Unknown";
+                                int lineNumber = frame.GetFileLineNumber();
+
+                                enhancedMsg += $"Called from: {method.DeclaringType?.FullName}.{method.Name}\n";
+                                enhancedMsg += $"File: {fileName}:line {lineNumber}\n";
+
+                                // Look for calling method
+                                int currentIndex = Array.IndexOf(frames, frame);
+                                if (currentIndex >= 0 && currentIndex < frames.Length - 1)
+                                {
+                                    StackFrame callingFrame = frames[currentIndex + 1];
+                                    MethodBase callingMethod = callingFrame.GetMethod();
+                                    if (callingMethod != null)
+                                    {
+                                        enhancedMsg += $"Called by: {callingMethod.DeclaringType?.FullName}.{callingMethod.Name}\n";
+                                    }
+                                }
+                                // Replace original message with enhanced version
+                                eventArgs = new LogEventArgs(enhancedMsg, eventArgs.Level, eventArgs.Source);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                // Can't use Logger here to avoid infinite recursion
+                Console.WriteLine($"Error in BetterServerRpcErrorLog patch: {ex.Message}");
+            }
+        }
+    }
+}
