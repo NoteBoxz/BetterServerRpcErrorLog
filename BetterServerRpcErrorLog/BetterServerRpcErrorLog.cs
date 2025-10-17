@@ -62,7 +62,7 @@ public class BetterServerRpcErrorLog : BaseUnityPlugin
 
     public static void PatchDynamic()
     {
-        Logger.LogInfo($"Dynamic patching...");
+        Logger.LogMessage($"Dynamic patching...");
         ServerRpcCount = 0;
         // Start a coroutine to perform the patching off the main thread
         GameObject go = new GameObject("SharedCoroutineStarter");
@@ -88,7 +88,7 @@ public class BetterServerRpcErrorLog : BaseUnityPlugin
                     currentCount++;
                     if (currentCount % 5 == 0 || currentCount == totalCount)
                     {
-                        Logger.LogMessage($"Patching progress: {currentCount}/{totalCount} assemblies processed " +
+                        Logger.LogInfo($"Patching progress: {currentCount}/{totalCount} assemblies processed " +
                                         $"{ServerRpcCount} ServerRpc methods patched, {RpcHandlerCount} RPC handlers patched");
                     }
                 }
@@ -98,7 +98,7 @@ public class BetterServerRpcErrorLog : BaseUnityPlugin
                 }
             }
 
-            Logger.LogInfo($"Dynamic patching complete. Processed {totalCount} assemblies. " +
+            Logger.LogMessage($"Dynamic patching complete. Processed {totalCount} assemblies. " +
                           $"Patched {ServerRpcCount} ServerRpc methods and {RpcHandlerCount} RPC handlers.");
         });
 
@@ -199,11 +199,25 @@ public class BetterServerRpcErrorLog : BaseUnityPlugin
                             Logger.LogWarning($"No ServerRpcAttribute found for {methodName} despite ending with 'ServerRpc', skipping");
                         continue;
                     }
-                    if (attr.RequireOwnership == false)
+                    
+                    // Check if RequireOwnership is explicitly set to false
+                    var customAttributeData = method.GetCustomAttributesData()
+                        .FirstOrDefault(x => x.AttributeType == typeof(ServerRpcAttribute));
+                    
+                    if (customAttributeData != null)
                     {
-                        if (LogAssemblyScanning.Value)
-                            Logger.LogInfo($"ServerRpcAttribute found for {methodName} but RequireOwnership is false, skipping");
-                        continue;
+                        // Check if RequireOwnership is explicitly set
+                        var requireOwnershipArg = customAttributeData.NamedArguments
+                            .FirstOrDefault(x => x.MemberName == "RequireOwnership");
+                        
+                        if (requireOwnershipArg.TypedValue.Value != null && 
+                            requireOwnershipArg.TypedValue.Value is bool requireOwnership && 
+                            requireOwnership == false)
+                        {
+                            if (LogAssemblyScanning.Value)
+                                Logger.LogInfo($"ServerRpcAttribute found for {methodName} but RequireOwnership is explicitly set to false, skipping");
+                            continue;
+                        }
                     }
 
                     // Create and apply a dynamic patch

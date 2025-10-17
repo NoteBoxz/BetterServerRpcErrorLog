@@ -12,13 +12,21 @@ using UnityEngine;
 
 namespace BetterServerRpcErrorLog.Patches;
 
-[HarmonyPatch(typeof(InitializeGame))]
+[HarmonyPatch(typeof(GameNetworkManager))]
 internal class InitPatch
 {
-    [HarmonyPatch(nameof(InitializeGame.Start))]
+    [HarmonyPatch(nameof(GameNetworkManager.Start))]
+    [HarmonyPriority(Priority.Last)]
     [HarmonyPostfix]
     private static void Postfix()
     {
-        BetterServerRpcErrorLog.PatchDynamic();
+        try
+        {
+            BetterServerRpcErrorLog.PatchDynamic();
+        }
+        catch (Exception ex)
+        {
+            BetterServerRpcErrorLog.Logger.LogFatal($"[BetterServerRpcErrorLog] Error during dynamic patching: {ex}");
+        }
     }
 }
